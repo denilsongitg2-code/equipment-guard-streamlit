@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 from datetime import date
 
 import pandas as pd
@@ -126,9 +127,28 @@ def dashboard():
         st.dataframe(alerts[["addition_number", "ticket_number", "collaborator", "role", "cost_center", "equipment_type", "analysis_status"]], width="stretch", hide_index=True)
 
 
+def _texto_valido(valor) -> str:
+    if valor is None or pd.isna(valor):
+        return ""
+    texto = str(valor).strip()
+    if texto.lower() in {"", "none", "nan", "nat"}:
+        return ""
+    if texto.endswith(".0") and texto[:-2].isdigit():
+        texto = texto[:-2]
+    return texto
+
+
+def _aditivo_pelo_nome_arquivo(filename: str) -> str:
+    nome = str(filename or "")
+    match = re.search(r"(?i)(?:aditivo|adtivo)[\s_-]*(\d{1,8})", nome)
+    if match:
+        return match.group(1)
+    return ""
+
+
 def import_page():
     st.title("Importar aditivo Excel")
-    st.write("O leitor identifica automaticamente a linha do cabeçalho, inclusive quando existe um texto acima da tabela, como no aditivo 518.")
+    st.write("O leitor identifica automaticamente a linha do cabeçalho e permite confirmar o número do aditivo antes da gravação.")
     file = st.file_uploader("Selecione o aditivo", type=["xlsx", "xlsm"])
     if not file:
         return
@@ -137,8 +157,53 @@ def import_page():
     except Exception as exc:
         st.error(str(exc))
         return
+
+    existentes = sorted({
+        _texto_valido(v) for v in df.get("addition_number", pd.Series(dtype=object)).tolist()
+        if _texto_valido(v)
+    })
+    pelo_arquivo = _aditivo_pelo_nome_arquivo(file.name)
+
+    if pelo_arquivo:
+        sugerido = pelo_arquivo
+    elif len(existentes) == 1:
+        sugerido = existentes[0]
+    else:
+        sugerido = ""
+
     st.success(f"Cabeçalho localizado na linha {header + 1}. {len(df)} linhas encontradas.")
-    st.dataframe(df, width="stretch", hide_index=True)
+
+    numero_aditivo = st.text_input(
+        "Número do aditivo",
+        value=sugerido,
+        placeholder="Ex.: 535",
+        help="Este número será aplicado a todas as linhas desta importação. Confirme antes de gravar.",
+    ).strip()
+
+    if existentes and numero_aditivo and any(x != numero_aditivo for x in existentes):
+        st.warning(
+            "A planilha contém número(s) de aditivo diferente(s): "
+            + ", ".join(existentes)
+            + f". Para esta importação, o sistema usará **{numero_aditivo}** em todas as linhas."
+        )
+
+    df_import = df.copy()
+    if numero_aditivo:
+        # O número confirmado na tela é a fonte de verdade para este arquivo.
+        df_import["addition_number"] = numero_aditivo
+
+    equipamentos_validos = df_import["equipment_type"].apply(_texto_valido).ne("")
+    qtd_importar = int(equipamentos_validos.sum())
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Linhas encontradas", len(df_import))
+    c2.metric("Linhas a importar", qtd_importar if numero_aditivo else 0)
+    c3.metric("Aditivo confirmado", numero_aditivo or "PENDENTE")
+
+    st.dataframe(df_import, width="stretch", hide_index=True)
+
+    if not numero_aditivo:
+        st.error("Informe o número do aditivo antes de importar. Nenhuma linha será gravada sem essa confirmação.")
 
     milvus = milvus_gateway()
     if milvus:
@@ -146,9 +211,9 @@ def import_page():
     else:
         st.warning("Milvus não conectado. Os itens serão marcados como PENDENTE_MILVUS e não deverão ser liberados automaticamente.")
 
-    if st.button("Importar e analisar", type="primary"):
+    if st.button("Importar e analisar", type="primary", disabled=not bool(numero_aditivo)):
         with st.spinner("Importando e analisando..."):
-            result = import_aditivo(df, file.name, milvus)
+            result = import_aditivo(df_import, file.name, milvus)
         st.success("Importação concluída.")
         st.json(result)
 
