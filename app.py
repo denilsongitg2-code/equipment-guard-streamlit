@@ -10,20 +10,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Streamlit Community Cloud: converte secrets em variáveis sem obrigar arquivo .env.
+# Configuração: prioriza Streamlit Secrets e usa variáveis de ambiente como fallback.
 import os
-try:
-    _secrets = dict(st.secrets)
-except Exception:
-    _secrets = {}
-for key in (
-    "APP_PASSWORD", "DATABASE_URL",
-    "MILVUS_API_KEY", "MILVUS_TOKEN", "MILVUS_API_URL", "MILVUS_AUTH_PREFIX",
-    "MILVUS_TIMEOUT", "MILVUS_PAGE_SIZE", "MILVUS_MAX_PAGES", "MILVUS_LOOKBACK_DAYS",
-    "MILVUS_CLOSED_STATUSES", "DUPLICATE_BLOCK_THRESHOLD", "DUPLICATE_REVIEW_THRESHOLD",
-):
-    if key in _secrets and key not in os.environ:
-        os.environ[key] = str(_secrets[key])
+
+def config_value(name: str, default: str = "") -> str:
+    try:
+        value = st.secrets.get(name, None)
+        if value is not None:
+            return str(value).strip()
+    except Exception:
+        pass
+    return str(os.getenv(name, default) or default).strip()
 
 import database as db
 from services.excel_service import read_aditivo
@@ -35,7 +32,7 @@ st.set_page_config(page_title="Equipment Guard", page_icon="💻", layout="wide"
 
 
 def require_login() -> None:
-    expected = os.getenv("APP_PASSWORD", "").strip()
+    expected = config_value("APP_PASSWORD")
     if not expected:
         st.error("APP_PASSWORD não configurado nos Secrets. Por segurança, o aplicativo foi bloqueado.")
         st.stop()
@@ -68,9 +65,14 @@ STATUS_LABELS = {
 }
 
 
-@st.cache_resource
 def milvus_gateway():
-    return get_milvus()
+    # Não usa cache: alterações nos Secrets passam a valer imediatamente após reiniciar o app.
+    api_key = config_value("MILVUS_API_KEY") or config_value("MILVUS_TOKEN")
+    api_url = config_value("MILVUS_API_URL", "https://apiintegracao.milvus.com.br/api/chamado/listagem")
+    auth_prefix = config_value("MILVUS_AUTH_PREFIX", "")
+    if not api_key:
+        return None
+    return get_milvus(api_key=api_key, api_url=api_url, auth_prefix=auth_prefix)
 
 
 def status_badge(value: str) -> str:
@@ -237,20 +239,47 @@ def conference_page():
 
 def milvus_page():
     st.title("Diagnóstico da API Milvus ITSM")
-    service = milvus_gateway()
-    if not service:
-        st.error("API Milvus não configurada. Adicione MILVUS_API_KEY nos Secrets do Streamlit.")
-        st.code('MILVUS_API_KEY = "SEU_TOKEN"\nMILVUS_API_URL = "https://apiintegracao.milvus.com.br/api/chamado/listagem"', language="toml")
+
+    api_key = config_value("MILVUS_API_KEY") or config_value("MILVUS_TOKEN")
+    api_url = config_value("MILVUS_API_URL", "https://apiintegracao.milvus.com.br/api/chamado/listagem")
+    auth_prefix = config_value("MILVUS_AUTH_PREFIX", "")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Token encontrado", "SIM" if api_key else "NÃO")
+    c2.metric("Tamanho do token", len(api_key) if api_key else 0)
+    c3.metric("URL configurada", "SIM" if api_url else "NÃO")
+    st.caption(f"Endpoint: {api_url or '-'}")
+    st.caption(f"Prefixo de autenticação: {auth_prefix or 'sem prefixo'}")
+
+    if not api_key:
+        st.error("MILVUS_API_KEY não foi encontrada nos Secrets do Streamlit.")
+        st.code(
+            'APP_PASSWORD = "SUA_SENHA"\n'
+            'MILVUS_API_KEY = "SEU_TOKEN_REAL"\n'
+            'MILVUS_API_URL = "https://apiintegracao.milvus.com.br/api/chamado/listagem"\n'
+            'MILVUS_AUTH_PREFIX = ""',
+            language="toml",
+        )
         return
 
-    st.success("Configuração da API carregada.")
-    st.json(service.connection_info())
-    if st.button("Testar conexão com a API"):
+    try:
+        service = milvus_gateway()
+    except Exception as exc:
+        st.error(f"A configuração foi encontrada, mas o cliente não pôde ser criado: {type(exc).__name__}: {exc}")
+        return
+
+    if not service:
+        st.error("O token foi encontrado, mas o cliente Milvus não foi criado.")
+        return
+
+    st.success("Configuração da API carregada. Agora teste a comunicação.")
+
+    if st.button("Testar conexão com a API", type="primary"):
         try:
             service.healthcheck()
             st.success("API Milvus respondeu corretamente.")
         except Exception as exc:
-            st.error(f"Falha ao consultar a API: {exc}")
+            st.error(f"Falha ao consultar a API: {type(exc).__name__}: {exc}")
 
     number = st.text_input("Testar número de chamado", placeholder="Ex.: 70221")
     if number and st.button("Buscar chamado"):
@@ -262,7 +291,7 @@ def milvus_page():
             else:
                 st.warning("Chamado não encontrado.")
         except Exception as exc:
-            st.error(f"Erro na consulta: {exc}")
+            st.error(f"Erro na consulta: {type(exc).__name__}: {exc}")
 
 
 page = st.sidebar.radio("Menu", ["Dashboard", "Importar aditivo", "Conferência", "Consultar aditivo", "Milvus"])
