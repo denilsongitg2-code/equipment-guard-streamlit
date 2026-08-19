@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import hmac
 import json
-from datetime import date, datetime
-from pathlib import Path
+from datetime import date
 
 import pandas as pd
 import streamlit as st
@@ -17,10 +17,10 @@ try:
 except Exception:
     _secrets = {}
 for key in (
-    "DATABASE_URL", "MILVUS_URI", "MILVUS_TOKEN", "MILVUS_SOURCE_COLLECTION", "MILVUS_ANALYSIS_COLLECTION",
-    "MILVUS_TICKET_FIELD", "MILVUS_STATUS_FIELD", "MILVUS_TEXT_FIELD", "MILVUS_SUBJECT_FIELD",
-    "MILVUS_COLLABORATOR_FIELD", "MILVUS_ROLE_FIELD", "MILVUS_COST_CENTER_FIELD", "MILVUS_OPEN_STATUSES", "MILVUS_OPEN_FILTER",
-    "DUPLICATE_BLOCK_THRESHOLD", "DUPLICATE_REVIEW_THRESHOLD",
+    "APP_PASSWORD", "DATABASE_URL",
+    "MILVUS_API_KEY", "MILVUS_TOKEN", "MILVUS_API_URL", "MILVUS_AUTH_PREFIX",
+    "MILVUS_TIMEOUT", "MILVUS_PAGE_SIZE", "MILVUS_MAX_PAGES", "MILVUS_LOOKBACK_DAYS",
+    "MILVUS_CLOSED_STATUSES", "DUPLICATE_BLOCK_THRESHOLD", "DUPLICATE_REVIEW_THRESHOLD",
 ):
     if key in _secrets and key not in os.environ:
         os.environ[key] = str(_secrets[key])
@@ -32,6 +32,31 @@ from services.milvus_service import get_milvus
 from services.schedule_service import next_send_date
 
 st.set_page_config(page_title="Equipment Guard", page_icon="💻", layout="wide")
+
+
+def require_login() -> None:
+    expected = os.getenv("APP_PASSWORD", "").strip()
+    if not expected:
+        st.error("APP_PASSWORD não configurado nos Secrets. Por segurança, o aplicativo foi bloqueado.")
+        st.stop()
+    if st.session_state.get("authenticated"):
+        return
+
+    st.title("🔐 Equipment Guard")
+    st.caption("Acesso restrito — controle de aditivos e prevenção de locação duplicada")
+    with st.form("login_form"):
+        password = st.text_input("Senha de acesso", type="password")
+        submitted = st.form_submit_button("Entrar", type="primary")
+    if submitted:
+        if hmac.compare_digest(password, expected):
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Senha inválida.")
+    st.stop()
+
+
+require_login()
 db.init_db()
 
 STATUS_LABELS = {
@@ -211,16 +236,24 @@ def conference_page():
 
 
 def milvus_page():
-    st.title("Diagnóstico Milvus")
+    st.title("Diagnóstico da API Milvus ITSM")
     service = milvus_gateway()
     if not service:
-        st.error("Milvus não conectado. Configure os secrets do Streamlit/GitHub.")
-        st.code('MILVUS_URI="https://seu-endpoint"\nMILVUS_TOKEN="seu-token"\nMILVUS_SOURCE_COLLECTION="chamados"', language="toml")
+        st.error("API Milvus não configurada. Adicione MILVUS_API_KEY nos Secrets do Streamlit.")
+        st.code('MILVUS_API_KEY = "SEU_TOKEN"\nMILVUS_API_URL = "https://apiintegracao.milvus.com.br/api/chamado/listagem"', language="toml")
         return
-    st.success("Conexão criada.")
+
+    st.success("Configuração da API carregada.")
     st.json(service.connection_info())
-    number = st.text_input("Testar chamado", placeholder="Ex.: 70031")
-    if number and st.button("Consultar no Milvus"):
+    if st.button("Testar conexão com a API"):
+        try:
+            service.healthcheck()
+            st.success("API Milvus respondeu corretamente.")
+        except Exception as exc:
+            st.error(f"Falha ao consultar a API: {exc}")
+
+    number = st.text_input("Testar número de chamado", placeholder="Ex.: 70221")
+    if number and st.button("Buscar chamado"):
         try:
             result = service.get_ticket(number)
             if result:
@@ -233,7 +266,10 @@ def milvus_page():
 
 
 page = st.sidebar.radio("Menu", ["Dashboard", "Importar aditivo", "Conferência", "Consultar aditivo", "Milvus"])
-st.sidebar.caption("Equipment Guard — prevenção de locação duplicada")
+st.sidebar.caption("Equipment Guard — API Milvus ITSM")
+if st.sidebar.button("Sair"):
+    st.session_state["authenticated"] = False
+    st.rerun()
 
 if page == "Dashboard":
     dashboard()
