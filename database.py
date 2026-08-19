@@ -3,13 +3,31 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, func, select
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///data/equipment_guard.db")
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+# Streamlit Community Cloud clona apenas arquivos versionados. Como pastas vazias
+# nao existem no Git, garantimos a criacao da pasta local antes de abrir o SQLite.
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_DB_PATH = BASE_DIR / "data" / "equipment_guard.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip() or f"sqlite:///{DEFAULT_DB_PATH.as_posix()}"
+
+if DATABASE_URL.startswith("sqlite"):
+    if DATABASE_URL.startswith("sqlite:///"):
+        raw_path = DATABASE_URL[len("sqlite:///"):]
+        if raw_path and raw_path != ":memory:":
+            db_path = Path(raw_path)
+            if not db_path.is_absolute():
+                db_path = (BASE_DIR / db_path).resolve()
+                DATABASE_URL = f"sqlite:///{db_path.as_posix()}"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+    connect_args = {"check_same_thread": False}
+else:
+    connect_args = {}
+
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, connect_args=connect_args)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 Base = declarative_base()
