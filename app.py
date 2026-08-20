@@ -354,16 +354,46 @@ def ti_requests_page():
         st.write(f"**Softwares/especificações:** {req['software_notes']}")
 
     milvus = milvus_gateway()
-    if milvus and st.button("Verificar chamados semelhantes no Milvus"):
-        query = build_milvus_subject(req["hiring_id"]) + "\n" + build_milvus_description(integration, req)
+    if milvus and st.button("Verificar duplicidade / trocas no Milvus"):
         try:
-            found = milvus.search_text(query, limit=8)
+            found = milvus.search_request_context(integration, req, limit=10)
             if found:
                 view = pd.DataFrame(found)
                 view["similaridade"] = view["score"].map(lambda x: f"{x:.0%}")
-                st.dataframe(view[["ticket_number", "status", "subject", "collaborator", "role", "cost_center", "similaridade"]], hide_index=True, width="stretch")
+                view["Risco"] = view["risk"].map({
+                    "CRITICO": "🔴 CRÍTICO",
+                    "ALTO": "🟠 ALTO",
+                    "REVISAR": "🟡 REVISAR",
+                    "BAIXO": "🟢 BAIXO",
+                }).fillna(view["risk"])
+                view["Motivo"] = view["reason"]
+                st.dataframe(
+                    view[["ticket_number", "status", "subject", "collaborator", "role", "cost_center", "similaridade", "Risco", "Motivo"]],
+                    hide_index=True,
+                    width="stretch",
+                )
+                strong = view[view["risk"].isin(["CRITICO", "ALTO"])]
+                review = view[view["risk"] == "REVISAR"]
+                if not strong.empty:
+                    st.warning("Há chamados com forte evidência de duplicidade. A TI deve conferir antes de aprovar.")
+                elif not review.empty:
+                    st.info("Há chamados para revisão, mas nenhuma evidência forte de duplicidade foi encontrada.")
+                else:
+                    st.success("Nenhuma evidência forte de duplicidade nos chamados abertos retornados.")
             else:
                 st.success("Nenhum chamado aberto semelhante localizado.")
+
+            replacements = milvus.find_replacement_tickets(integration, limit=10)
+            if replacements:
+                st.subheader("⚠️ Possíveis trocas / substituições em andamento")
+                repl = pd.DataFrame(replacements)
+                repl["Evidência"] = repl["replacement_reason"]
+                st.dataframe(
+                    repl[["ticket_number", "status", "subject", "collaborator", "role", "cost_center", "Evidência"]],
+                    hide_index=True,
+                    width="stretch",
+                )
+                st.warning("Existe chamado de possível troca ligado à mesma pessoa/posição. Tratar antes de uma nova compra/locação.")
         except Exception as exc:
             st.error(f"Falha na consulta ao Milvus: {exc}")
 
@@ -374,27 +404,49 @@ def ti_requests_page():
     milvus_ticket = c1.text_input("Chamado Milvus", value=req.get("milvus_ticket") or "")
     addition_number = c2.text_input("Aditivo", value=req.get("addition_number") or "")
     c1, c2 = st.columns(2)
-    sent_default = req.get("addition_sent_at") or date.today()
-    sent_date = c1.date_input("Data de envio do aditivo", value=sent_default)
-    delivered_default = req.get("delivered_at") or date.today()
-    delivered_date = c2.date_input("Data de entrega", value=delivered_default)
+    sent_date = c1.date_input(
+        "Data de envio do aditivo",
+        value=req.get("addition_sent_at"),
+        help="Preencha somente quando o aditivo tiver sido efetivamente enviado ao fornecedor. É desta data que começa o SLA de 15 dias úteis.",
+    )
+    delivered_date = c2.date_input(
+        "Data de entrega",
+        value=req.get("delivered_at"),
+        help="Preencha somente quando o equipamento tiver sido entregue ao colaborador.",
+    )
     ti_notes = st.text_area("Observação TI", value=req.get("notes") or "")
 
     if st.button("Salvar tratativa", type="primary"):
-        changes = {
-            "status": new_status,
-            "milvus_ticket": milvus_ticket.strip() or None,
-            "addition_number": addition_number.strip() or None,
-            "notes": ti_notes.strip() or None,
-        }
-        if new_status in {"ADITIVO_ENVIADO", "AGUARDANDO_FORNECEDOR", "RECEBIDO_TI", "PRONTO_ENTREGA", "ENTREGUE", "CONCLUIDO"}:
-            changes["addition_sent_at"] = sent_date
-            changes["sla_due_date"] = add_business_days(sent_date, 15)
-        if new_status in {"ENTREGUE", "CONCLUIDO"}:
-            changes["delivered_at"] = delivered_date
-        db.update_equipment_request(code, **changes)
-        st.success("Tratativa salva.")
-        st.rerun()
+        sent_statuses = {"ADITIVO_ENVIADO", "AGUARDANDO_FORNECEDOR", "RECEBIDO_TI", "PRONTO_ENTREGA", "ENTREGUE", "CONCLUIDO"}
+        delivered_statuses = {"ENTREGUE", "CONCLUIDO"}
+
+        validation_error = None
+        if new_status in sent_statuses and not addition_number.strip():
+            validation_error = "Informe o número do aditivo antes de marcar o item como enviado/aguardando fornecedor."
+        elif new_status in sent_statuses and not sent_date:
+            validation_error = "Informe a data real de envio do aditivo. O SLA de 15 dias úteis começa nessa data."
+        elif new_status in delivered_statuses and not delivered_date:
+            validation_error = "Informe a data de entrega antes de marcar a solicitação como Entregue/Concluída."
+        elif sent_date and delivered_date and delivered_date < sent_date:
+            validation_error = "A data de entrega não pode ser anterior à data de envio do aditivo."
+
+        if validation_error:
+            st.error(validation_error)
+        else:
+            changes = {
+                "status": new_status,
+                "milvus_ticket": milvus_ticket.strip() or None,
+                "addition_number": addition_number.strip() or None,
+                "notes": ti_notes.strip() or None,
+            }
+            if new_status in sent_statuses:
+                changes["addition_sent_at"] = sent_date
+                changes["sla_due_date"] = add_business_days(sent_date, 15)
+            if new_status in delivered_statuses:
+                changes["delivered_at"] = delivered_date
+            db.update_equipment_request(code, **changes)
+            st.success("Tratativa salva.")
+            st.rerun()
 
     if req.get("sla_due_date"):
         st.info(f"SLA de entrega: **15 dias úteis** a partir do envio do aditivo. Prazo: **{fmt_date(req['sla_due_date'])}** — {sla_label(req['sla_due_date'])}")
